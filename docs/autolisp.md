@@ -88,15 +88,16 @@ DXF file holds for the object, plus `-1` (its name) and `410` (its layout). Angl
 are in radians, as in AutoCAD, where the file holds degrees; `entmake`, `entmod` and `ssget`
 filters take radians too.
 
-Extended data (xdata) is the group `-3`, one sublist per application:
-`(-3 ("ACME" (1000 . "D-07") (1070 . 3)))`. `entget` adds that item only for the applications
-named in its second argument (`'("ACME")`, or `'("*")` for every one); without the argument an
-entity list has no `-3`, as in AutoCAD. `entmod` takes the same shape back and replaces only the
-applications the list names — another application's data is left alone — while an application
-named with no groups after it is removed. Group codes keep their types: `1070` and `1071` are
-integers, `1040`–`1042` reals, and a `1010` point comes back as `(1010 x y z)`. `regapp` answers
-the name, or nil when the drawing already holds data for it: there is no APPID table to add a
-record to, because `tblsearch "APPID"` reads the applications out of the drawing's own xdata.
+Extended data (xdata) is the group `-3`, one sublist per application: `(-3 ("ACME" (1000 . "D-07")
+(1070 . 3)))`. `entget` adds that item only for the applications named in its second argument
+(`'("ACME")`, or `'("*")` for every one); without the argument an entity list has no `-3`, as in
+AutoCAD. `entmod` takes the same shape back and replaces only the applications the list names —
+another application's data is left alone — while an application named with no groups after it is
+removed. `entmake` takes it too, so an entity can be made with its data already on it. Group codes
+keep their types: `1070` and `1071` are integers, `1040`–`1042` reals, and a `1010` point comes back
+as `(1010 x y z)`. `regapp` answers the name, or nil when the drawing already holds data for it:
+there is no APPID table to add a record to, because `tblsearch "APPID"` reads the applications out
+of the drawing's own xdata.
 
 `entmake` defines blocks: a BLOCK list (2 name, 70 flags, 10 base point, 4 description) begins a
 definition, the entities made after it go into the block instead of the drawing, and an ENDBLK

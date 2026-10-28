@@ -375,10 +375,17 @@ pub fn entmake(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
         Ok((k, _)) if k == "ENDBLK" => return Ok(Flow::Value(end_block(ctx))),
         _ => {}
     }
-    let (_, common, kind) = match entity_from_list(ctx, list) {
+    let (_, mut common, kind) = match entity_from_list(ctx, list) {
         Ok(x) => x,
         Err(_) => return Ok(Flow::Value(Value::Nil)),
     };
+    // The xdata an entmake list carries is applied here, because `list_to_groups` leaves `-3`
+    // out: it is not an ordinary group. Without this the entity would be made and its data
+    // dropped on the way in - the same silent loss this commit fixes for entmod.
+    if let Some(item) = list.iter().find(|v| v.car().as_number() == Some(-3.0)) {
+        let Ok(incoming) = super::xdata::from_item(&item) else { return Ok(Flow::Value(Value::Nil)) };
+        common.xdata = super::xdata::merge(&[], incoming);
+    }
     if let Some((_, ents)) = ctx.env.pending_block.as_mut() {
         // Into the block being defined; it is added to the drawing, with handles and the layers
         // its entities name, at ENDBLK (a refused or dropped definition leaves nothing behind).
@@ -539,6 +546,27 @@ pub fn entmod(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
 /// `tblsearch`), so there is nothing to add: a name becomes registered by being used. The
 /// function exists because routines call it before writing xdata, and a missing `regapp` stops
 /// them at the first line — which is what happened to every routine that keeps its own data.
+/// Every application name the drawing holds xdata for, in the order it is met.
+///
+/// Model space, every layout and every block definition: an application used only by a
+/// paper-space or block entity is in the drawing just as much as one used in model space, and
+/// reading only `model` would answer that it is not there. Reads the `1001` groups straight,
+/// because the names are all that is wanted here, not the groups under them.
+fn xdata_apps(d: &cadcraft_doc::Drawing) -> Vec<String> {
+    let stores = std::iter::once(&d.model).chain(d.layouts.iter().map(|l| &l.entities)).chain(d.blocks.values().map(|b| &b.entities));
+    let mut names: Vec<String> = Vec::new();
+    for store in stores {
+        for e in store.iter() {
+            for app in e.common.xdata.iter().filter(|t| t.code == super::xdata::APP).map(|t| t.value.trim()) {
+                if !app.is_empty() && !names.iter().any(|n| n.eq_ignore_ascii_case(app)) {
+                    names.push(app.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
 pub fn regapp(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
     arity(&a, 1, 1)?;
     let name = match &a[0] {
@@ -549,10 +577,7 @@ pub fn regapp(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
         return Ok(Flow::Value(Value::Nil));
     }
     // already readable from the drawing: answer nil, as AutoCAD does for a name it already has
-    let known = ctx
-        .s
-        .doc()
-        .is_ok_and(|d| d.model.iter().any(|e| super::xdata::blocks(&e.common.xdata).iter().any(|(app, _)| app.eq_ignore_ascii_case(&name))));
+    let known = ctx.s.doc().is_ok_and(|d| xdata_apps(d).iter().any(|app| app.eq_ignore_ascii_case(&name)));
     Ok(Flow::Value(if known { Value::Nil } else { Value::str(&name) }))
 }
 
@@ -1036,11 +1061,9 @@ fn table_records(d: &cadcraft_doc::Drawing, table: &str) -> Vec<Value> {
         // reading of the drawing rather than a declaration kept beside it.
         "APPID" => {
             let mut names = vec!["ACAD".to_string()];
-            for e in d.model.iter() {
-                for (app, _) in super::xdata::blocks(&e.common.xdata) {
-                    if !names.iter().any(|n| n.eq_ignore_ascii_case(&app)) {
-                        names.push(app);
-                    }
+            for app in xdata_apps(d) {
+                if !names.iter().any(|n| n.eq_ignore_ascii_case(&app)) {
+                    names.push(app);
                 }
             }
             names.into_iter().map(|n| Value::list(vec![pair(0, Value::str("APPID")), pair(2, Value::str(&n)), pair(70, Value::Int(0))])).collect()

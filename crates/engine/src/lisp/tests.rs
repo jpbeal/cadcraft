@@ -1076,3 +1076,42 @@ EOF
     assert_eq!(ok(&mut s, "(cdr (assoc 8 (entget (handent \"2A\"))))"), "\"OTHER\"", "the layer changed");
     assert_eq!(values(&s), vec!["7".to_string()], "and the attribute survived");
 }
+
+#[test]
+fn an_entmake_keeps_the_xdata_its_list_carries() {
+    // The other door into the same loss. `list_to_groups` leaves `-3` out, and entmake hands
+    // what is left to `entity_from_list` - so the entity was made and the data it arrived with
+    // was dropped, by the call that was asked to store it.
+    let mut s = session();
+    ok(&mut s, "(entmake '((0 . \"LINE\") (8 . \"0\") (10 0 0 0) (11 5 0 0) (-3 (\"ACME\" (1000 . \"panel=P-1\")))))");
+    ok(&mut s, "(setq e (entlast))");
+    let v = ok(&mut s, "(cdr (assoc -3 (entget e '(\"ACME\"))))");
+    assert_eq!(v, "((\"ACME\" (1000 . \"panel=P-1\")))", "the xdata came in with the entity: {v}");
+}
+
+#[test]
+fn a_real_in_xdata_keeps_all_of_its_digits() {
+    // The AutoLISP display format rounds to six significant digits, which is right for showing
+    // a number and wrong for storing one: 1234567.89 was stored as 1234570.0, so a coordinate
+    // kept in xdata moved two units on the way in and nothing said so.
+    let mut s = session();
+    a_line(&mut s);
+    ok(&mut s, "(entmod (append (entget e) '((-3 (\"ACME\" (1040 . 1234567.89) (1010 1234567.89 0.1234567890123 2.5))))))");
+    ok(&mut s, "(setq x (car (cdr (assoc -3 (entget e '(\"ACME\"))))))");
+    assert_eq!(ok(&mut s, "(if (equal (cdr (nth 1 x)) 1234567.89 1e-9) \"yes\" \"no\")"), "\"yes\"", "the real kept its digits");
+    assert_eq!(ok(&mut s, "(if (equal (nth 1 (nth 2 x)) 1234567.89 1e-9) \"yes\" \"no\")"), "\"yes\"", "and so did the point's x");
+    assert_eq!(ok(&mut s, "(if (equal (nth 2 (nth 2 x)) 0.1234567890123 1e-15) \"yes\" \"no\")"), "\"yes\"", "and its y");
+}
+
+#[test]
+fn an_appid_in_a_block_definition_is_in_the_drawing_too() {
+    // An application used only inside a block definition, or on a layout, holds data in this
+    // drawing just as much as one used in model space. Reading `model` alone answered that it
+    // was not there, so `regapp` handed its name back as free and `tblsearch` denied it.
+    let mut s = session();
+    ok(&mut s, "(entmake '((0 . \"BLOCK\") (2 . \"P\") (10 0 0 0) (70 . 0)))");
+    ok(&mut s, "(entmake '((0 . \"LINE\") (8 . \"0\") (10 0 0 0) (11 1 0 0) (-3 (\"INBLOCK\" (1000 . \"kind=outlet\")))))");
+    ok(&mut s, "(entmake '((0 . \"ENDBLK\")))");
+    assert_eq!(ok(&mut s, "(if (tblsearch \"APPID\" \"INBLOCK\") \"yes\" \"no\")"), "\"yes\"", "the table sees it");
+    assert_eq!(ok(&mut s, "(regapp \"INBLOCK\")"), "nil", "and regapp does not hand the name out as free");
+}

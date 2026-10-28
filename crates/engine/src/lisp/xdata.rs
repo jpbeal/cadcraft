@@ -19,7 +19,7 @@ use super::LispError;
 use super::value::Value;
 
 /// The group that opens an application's data.
-const APP: i32 = 1001;
+pub(super) const APP: i32 = 1001;
 
 /// A value of a group inside xdata, by what that group holds.
 ///
@@ -142,7 +142,7 @@ fn tag_from(item: &Value) -> Result<Vec<RawTag>, LispError> {
         Ok(match v {
             Value::Str(s) => s.to_string(),
             Value::Int(i) => i.to_string(),
-            Value::Real(r) => crate::lisp::value::to_text(&Value::Real(*r), false),
+            Value::Real(r) => to_num(*r),
             Value::Ename(h) => h.hex(),
             other => return Err(LispError::bad_arg("DXF group value", other)),
         })
@@ -160,8 +160,14 @@ fn tag_from(item: &Value) -> Result<Vec<RawTag>, LispError> {
     Ok(vec![RawTag { code, value: text(&item.cdr())? }])
 }
 
+/// A real on its way into a tag.
+///
+/// Not `value::to_text`, which is the AutoLISP *display* format: it rounds to six significant
+/// digits, so storing through it turned a coordinate's last digits into nothing on the way in,
+/// before anything could read them back. `to_string` round-trips, and it is what the document
+/// already uses for a real in a tag.
 fn to_num(v: f64) -> String {
-    crate::lisp::value::to_text(&Value::Real(v), false)
+    v.to_string()
 }
 
 /// The applications a `(-3 ...)` item names, with their groups.
