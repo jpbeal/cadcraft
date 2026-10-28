@@ -993,3 +993,86 @@ fn an_entity_without_xdata_answers_nothing() {
     assert_eq!(ok(&mut s, "(if (assoc -3 (entget e '(\"ACME\"))) \"yes\" \"no\")"), "\"no\"");
     assert_eq!(ok(&mut s, "(if (assoc -3 (entget e '(\"*\"))) \"yes\" \"no\")"), "\"no\"");
 }
+
+#[test]
+fn an_entmod_does_not_throw_a_block_reference_attributes_away() {
+    // Same cause as the xdata: `entget` does not emit a block reference's attributes (there
+    // is no group for them in the list), so the rebuilt entity came back with none and the
+    // entmod wiped every value. In an electrical drawing that is the circuit number of each
+    // outlet.
+    //
+    // The check is on the model and not through LISP on purpose: the attributes are part of
+    // the Insert rather than entities of their own, so `entnext` never shows them - which is
+    // exactly why the group list could not carry them back.
+    const DXF: &str = "0
+SECTION
+2
+ENTITIES
+0
+INSERT
+5
+2A
+8
+0
+2
+P
+10
+0
+20
+0
+30
+0
+66
+1
+0
+ATTRIB
+5
+2B
+8
+0
+10
+0
+20
+0
+30
+0
+40
+0.2
+1
+7
+2
+CIRCUIT
+70
+0
+0
+SEQEND
+5
+2C
+0
+ENDSEC
+0
+EOF
+";
+
+    set_entity_codec(EntityCodec { groups: cadcraft_io::entity_groups, entity: cadcraft_io::entity_from_groups });
+    let d = cadcraft_io::read_dxf(DXF.as_bytes()).unwrap();
+    let mut s = Session::empty();
+    s.open_drawing(d, "attribs", None);
+
+    let values = |s: &Session| -> Vec<String> {
+        let doc = s.doc().unwrap();
+        doc.model
+            .iter()
+            .find_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Insert(i) => Some(i.attribs.iter().map(|a| a.text.value.clone()).collect()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(values(&s), vec!["7".to_string()], "the attribute was read from the file");
+
+    // an entmod that says nothing about attributes: it only changes the layer
+    ok(&mut s, "(setq e (handent \"2A\")) (setq d (entget e)) (entmod (subst (cons 8 \"OTHER\") (assoc 8 d) d))");
+    assert_eq!(ok(&mut s, "(cdr (assoc 8 (entget (handent \"2A\"))))"), "\"OTHER\"", "the layer changed");
+    assert_eq!(values(&s), vec!["7".to_string()], "and the attribute survived");
+}

@@ -485,6 +485,24 @@ pub fn entmod(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
     if !kind_name.eq_ignore_ascii_case(old.kind.dxf_name()) {
         return Ok(Flow::Value(Value::Nil));
     }
+    // A BLOCK REFERENCE'S ATTRIBUTES ARE NOT LOST EITHER
+    //
+    // Same cause as the xdata below: in a block reference the attributes are part of the
+    // entity (`Insert::attribs`), and `entget` does not emit them - there is no group for them
+    // in the list. So `entity_from_list` returned an Insert with no attributes at all, and the
+    // entmod wiped every value. In an electrical drawing that is the circuit number of each
+    // outlet; in any drawing it is the text the block shows.
+    //
+    // The list cannot supply them, so the ones the block already has stay. A list that does
+    // bring attributes keeps winning, for when `entget` learns to emit them.
+    let mut kind = kind;
+    if let (cadcraft_doc::EntityKind::Insert(new_ins), cadcraft_doc::EntityKind::Insert(old_ins)) = (&mut kind, &old.kind)
+        && new_ins.attribs.is_empty()
+        && !old_ins.attribs.is_empty()
+    {
+        new_ins.attribs = old_ins.attribs.clone();
+    }
+
     // XDATA IS NOT LOST IN AN ENTMOD
     //
     // `common` comes from `entity_from_list`, which rebuilds the entity from the groups of the
