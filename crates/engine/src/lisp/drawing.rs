@@ -287,7 +287,11 @@ fn list_to_groups(list: &Value) -> Result<(String, Vec<Tag>), LispError> {
                     other => return Err(LispError::bad_arg("stringp", other)),
                 })
             }
-            -1 | 5 | 330 | 360 | 410 | 102 => {}
+            // `-3` is xdata, and not an ordinary group: its value is a list of applications,
+            // and `entmod` is what applies it (see `lisp/xdata.rs`). Without this arm it fell
+            // through to the generic one, raised "DXF group value" and `entmod` answered nil
+            // silently - which is why xdata could not be written from LISP at all.
+            -1 | 5 | 330 | 360 | 410 | 102 | -3 => {}
             _ if point_group(code) && matches!(v, Value::Cons(_)) => {
                 let p = v.as_point().ok_or_else(|| LispError::bad_arg("2D/3D point", &v))?;
                 tags.push(Tag::f(code, p[0]));
@@ -334,6 +338,14 @@ pub fn entget(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
         if after_marker {
             items.push(Value::cons(Value::Int(410), Value::str(&layout)));
             placed_layout = true;
+        }
+    }
+    // The applications asked for, as AutoCAD does it: without a second argument an entity list
+    // has no `-3` at all, and with one it holds only those applications' data.
+    if let Some(apps) = a.get(1) {
+        let apps = super::xdata::wanted(apps)?;
+        if let Some(x) = super::xdata::item(&e.common.xdata, &apps) {
+            items.push(x);
         }
     }
     Ok(Flow::Value(Value::list(items)))
@@ -473,6 +485,21 @@ pub fn entmod(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
     if !kind_name.eq_ignore_ascii_case(old.kind.dxf_name()) {
         return Ok(Flow::Value(Value::Nil));
     }
+    // XDATA IS NOT LOST IN AN ENTMOD
+    //
+    // `common` comes from `entity_from_list`, which rebuilds the entity from the groups of the
+    // list - and xdata is not an ordinary group, so it came back empty. With
+    // `e.common = common`, any entmod (changing a layer, moving a vertex) wiped the entity's
+    // xdata without saying anything: another program's hyperlink, the annotative scale,
+    // another application's mark. Here the entity's current xdata is the base, and the list
+    // changes ONLY the applications it names.
+    let mut common = common;
+    let incoming = match list.iter().find(|v| v.car().as_number() == Some(-3.0)) {
+        Some(item) => super::xdata::from_item(&item)?,
+        None => Vec::new(),
+    };
+    common.xdata = super::xdata::merge(&old.common.xdata, incoming);
+
     let Ok(d) = ctx.s.doc_mut() else { return Ok(Flow::Value(Value::Nil)) };
     d.ensure_layer(&common.layer);
     let ok = d
@@ -485,6 +512,30 @@ pub fn entmod(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
         ctx.s.touch();
     }
     Ok(Flow::Value(if ok { list.clone() } else { Value::Nil }))
+}
+
+/// `(regapp name)`: make an application name usable in xdata.
+///
+/// In AutoCAD this adds a record to the APPID table and answers the name, or nil when the name
+/// is already there. Here the table is read back from the xdata the drawing holds (see
+/// `tblsearch`), so there is nothing to add: a name becomes registered by being used. The
+/// function exists because routines call it before writing xdata, and a missing `regapp` stops
+/// them at the first line — which is what happened to every routine that keeps its own data.
+pub fn regapp(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
+    arity(&a, 1, 1)?;
+    let name = match &a[0] {
+        Value::Str(s) => s.trim().to_string(),
+        other => return Err(LispError::bad_arg("stringp", other)),
+    };
+    if name.is_empty() {
+        return Ok(Flow::Value(Value::Nil));
+    }
+    // already readable from the drawing: answer nil, as AutoCAD does for a name it already has
+    let known = ctx
+        .s
+        .doc()
+        .is_ok_and(|d| d.model.iter().any(|e| super::xdata::blocks(&e.common.xdata).iter().any(|(app, _)| app.eq_ignore_ascii_case(&name))));
+    Ok(Flow::Value(if known { Value::Nil } else { Value::str(&name) }))
 }
 
 /// `(entupd ename)`: redraw an entity (the canvas redraws on its own).
@@ -962,7 +1013,20 @@ fn table_records(d: &cadcraft_doc::Drawing, table: &str) -> Vec<Value> {
             .iter()
             .map(|s| Value::list(vec![pair(0, Value::str("DIMSTYLE")), pair(2, Value::str(&s.name)), pair(70, Value::Int(0))]))
             .collect(),
-        "APPID" => vec![Value::list(vec![pair(0, Value::str("APPID")), pair(2, Value::str("ACAD")), pair(70, Value::Int(0))])],
+        // The applications the drawing actually holds data for, and not a fixed list: an
+        // entity's xdata names its application in the `1001` group, so this table is a
+        // reading of the drawing rather than a declaration kept beside it.
+        "APPID" => {
+            let mut names = vec!["ACAD".to_string()];
+            for e in d.model.iter() {
+                for (app, _) in super::xdata::blocks(&e.common.xdata) {
+                    if !names.iter().any(|n| n.eq_ignore_ascii_case(&app)) {
+                        names.push(app);
+                    }
+                }
+            }
+            names.into_iter().map(|n| Value::list(vec![pair(0, Value::str("APPID")), pair(2, Value::str(&n)), pair(70, Value::Int(0))])).collect()
+        }
         _ => Vec::new(),
     }
 }

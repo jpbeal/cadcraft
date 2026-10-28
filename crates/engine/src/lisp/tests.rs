@@ -876,3 +876,120 @@ fn angtof_reads_the_string_in_the_given_units() {
     assert_eq!(ok(&mut s, "(angtof \"180\" 7)"), "nil");
     assert_eq!(ok(&mut s, "(angtof \"180\" \"x\")"), "nil");
 }
+
+// ---------------------------------------------------------------------------
+//  xdata: a routine's own data on an entity
+//
+//  A routine that keeps its own data on the drawing (an electrical point knowing which panel
+//  feeds it, a conduit knowing which two points it joins) writes it as xdata, because xdata
+//  survives COPY, ARRAY and the file. Without these four things it cannot:
+//
+//    regapp         the first line of every such routine
+//    entget + apps  reading it back
+//    entmod + (-3)  writing it
+//    and above all: an ORDINARY entmod not throwing it away
+// ---------------------------------------------------------------------------
+
+/// A LINE to hang data on.
+fn a_line(s: &mut Session) {
+    ok(s, "(entmake '((0 . \"LINE\") (8 . \"0\") (10 0 0 0) (11 5 0 0))) (setq e (entlast))");
+}
+
+#[test]
+fn regapp_answers_the_name() {
+    let mut s = session();
+    assert_eq!(ok(&mut s, "(regapp \"ACME\")"), "\"ACME\"");
+    assert_eq!(ok(&mut s, "(regapp \"\")"), "nil");
+}
+
+#[test]
+fn an_entity_list_has_no_xdata_unless_it_was_asked_for() {
+    let mut s = session();
+    a_line(&mut s);
+    ok(&mut s, "(entmod (append (entget e) '((-3 (\"ACME\" (1000 . \"panel=P-1\"))))))");
+    // without the second argument there is no -3 at all, which is how AutoCAD answers
+    assert_eq!(ok(&mut s, "(if (assoc -3 (entget e)) \"yes\" \"no\")"), "\"no\"");
+    assert_eq!(ok(&mut s, "(if (assoc -3 (entget e '(\"ACME\"))) \"yes\" \"no\")"), "\"yes\"");
+}
+
+#[test]
+fn xdata_written_from_lisp_reads_back() {
+    let mut s = session();
+    a_line(&mut s);
+    ok(&mut s, "(regapp \"ACME\")");
+    ok(&mut s, "(entmod (append (entget e) '((-3 (\"ACME\" (1000 . \"panel=P-1\") (1000 . \"kind=outlet\") (1070 . 7) (1040 . 2.5))))))");
+    let v = ok(&mut s, "(cdr (assoc -3 (entget e '(\"ACME\"))))");
+    assert_eq!(v, "((\"ACME\" (1000 . \"panel=P-1\") (1000 . \"kind=outlet\") (1070 . 7) (1040 . 2.5)))", "{v}");
+    // and the integer comes back an integer, not 7.0: whoever reads it does arithmetic
+    assert_eq!(ok(&mut s, "(cdr (assoc 1070 (cdar (cdr (assoc -3 (entget e '(\"ACME\")))))))"), "7");
+}
+
+#[test]
+fn an_ordinary_entmod_does_not_throw_the_xdata_away() {
+    // THIS IS THE BUG THE REST OF THE WORK CAME FROM.
+    //
+    // `common` comes from the group list, and xdata is not an ordinary group - so it came back
+    // empty and `e.common = common` wiped the entity's xdata. Changing a layer destroyed
+    // another application's data, silently. For a routine that keeps its model in the drawing
+    // that is not a detail: it loses the job on the first command that touches anything.
+    let mut s = session();
+    a_line(&mut s);
+    ok(&mut s, "(entmod (append (entget e) '((-3 (\"ACME\" (1000 . \"panel=P-1\"))))))");
+    // an entmod that says nothing about xdata: it only changes the layer
+    ok(&mut s, "(setq d (entget e)) (entmod (subst (cons 8 \"OTHER\") (assoc 8 d) d))");
+    assert_eq!(ok(&mut s, "(cdr (assoc 8 (entget e)))"), "\"OTHER\"", "the layer changed");
+    let v = ok(&mut s, "(cdr (assoc -3 (entget e '(\"ACME\"))))");
+    assert_eq!(v, "((\"ACME\" (1000 . \"panel=P-1\")))", "the xdata survived: {v}");
+}
+
+#[test]
+fn writing_one_application_leaves_another_alone() {
+    let mut s = session();
+    a_line(&mut s);
+    ok(&mut s, "(entmod (append (entget e) '((-3 (\"PE_URL\" (1000 . \"https://x/7\"))))))");
+    ok(&mut s, "(entmod (append (entget e) '((-3 (\"ACME\" (1000 . \"kind=conduit\"))))))");
+    // both are there, and "*" asks for all of them
+    let v = ok(&mut s, "(cdr (assoc -3 (entget e '(\"*\"))))");
+    assert!(v.contains("PE_URL") && v.contains("ACME"), "{v}");
+    // and writing one of them again does not touch the other
+    ok(&mut s, "(entmod (append (entget e) '((-3 (\"ACME\" (1000 . \"kind=feed\"))))))");
+    let v = ok(&mut s, "(cdr (assoc -3 (entget e '(\"PE_URL\"))))");
+    assert_eq!(v, "((\"PE_URL\" (1000 . \"https://x/7\")))", "{v}");
+}
+
+#[test]
+fn naming_an_application_with_no_groups_removes_it() {
+    let mut s = session();
+    a_line(&mut s);
+    ok(&mut s, "(entmod (append (entget e) '((-3 (\"ACME\" (1000 . \"kind=conduit\"))))))");
+    ok(&mut s, "(entmod (append (entget e) '((-3 (\"ACME\")))))");
+    assert_eq!(ok(&mut s, "(if (assoc -3 (entget e '(\"ACME\"))) \"yes\" \"no\")"), "\"no\"");
+}
+
+#[test]
+fn the_appid_table_reports_what_the_drawing_holds() {
+    let mut s = session();
+    a_line(&mut s);
+    assert_eq!(ok(&mut s, "(if (tblsearch \"APPID\" \"ACME\") \"yes\" \"no\")"), "\"no\"");
+    ok(&mut s, "(entmod (append (entget e) '((-3 (\"ACME\" (1000 . \"kind=conduit\"))))))");
+    assert_eq!(ok(&mut s, "(if (tblsearch \"APPID\" \"ACME\") \"yes\" \"no\")"), "\"yes\"");
+    // and a name already in use is not registered again
+    assert_eq!(ok(&mut s, "(regapp \"ACME\")"), "nil");
+}
+
+#[test]
+fn a_point_in_xdata_survives_the_round_trip() {
+    let mut s = session();
+    a_line(&mut s);
+    ok(&mut s, "(entmod (append (entget e) '((-3 (\"ACME\" (1010 1.5 2.5 0.0))))))");
+    let v = ok(&mut s, "(cdr (assoc -3 (entget e '(\"ACME\"))))");
+    assert_eq!(v, "((\"ACME\" (1010 1.5 2.5 0.0)))", "{v}");
+}
+
+#[test]
+fn an_entity_without_xdata_answers_nothing() {
+    let mut s = session();
+    a_line(&mut s);
+    assert_eq!(ok(&mut s, "(if (assoc -3 (entget e '(\"ACME\"))) \"yes\" \"no\")"), "\"no\"");
+    assert_eq!(ok(&mut s, "(if (assoc -3 (entget e '(\"*\"))) \"yes\" \"no\")"), "\"no\"");
+}
