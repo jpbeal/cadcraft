@@ -1115,3 +1115,93 @@ fn an_appid_in_a_block_definition_is_in_the_drawing_too() {
     assert_eq!(ok(&mut s, "(if (tblsearch \"APPID\" \"INBLOCK\") \"yes\" \"no\")"), "\"yes\"", "the table sees it");
     assert_eq!(ok(&mut s, "(regapp \"INBLOCK\")"), "nil", "and regapp does not hand the name out as free");
 }
+
+#[test]
+fn an_entmod_keeps_every_part_of_common_the_group_list_cannot_carry() {
+    // The general shape of the two fixes above, as a guard. `entity_from_list` rebuilds `common`
+    // from the group list, so every part of Common the list has no group for came back empty and
+    // was written over the entity: the xdata did, and so do the annotative scales, which ride in
+    // a separate record rather than in the entity's groups. Here every field is set away from its
+    // default and only the layer is changed, so anything that does not survive is a part of the
+    // entity that a layer change destroys - and a field added to Common later without a group of
+    // its own fails here instead of quietly going missing.
+    let mut s = session();
+    a_line(&mut s);
+    let h = s.doc().unwrap().model.handles().first().copied().unwrap();
+    s.doc_mut().unwrap().model.modify(h, |e| {
+        e.common.color = cadcraft_doc::color::Color::Index(3);
+        e.common.linetype = "DASHED".into();
+        e.common.lineweight = cadcraft_doc::Lineweight::Mm100(50);
+        e.common.ltscale = 2.5;
+        e.common.transparency = cadcraft_doc::Transparency::Percent(40);
+        e.common.visible = false;
+        e.common.thickness = 1.25;
+        e.common.extrusion = cadcraft_doc::geom::Vec3::new(0.0, 0.0, -1.0);
+        e.common.plot_style = "Style1".into();
+        e.common.anno_scales = vec![cadcraft_doc::AnnoScale { name: "1:50".into(), paper_units: 1.0, drawing_units: 50.0 }];
+        e.common.xdata =
+            vec![cadcraft_doc::RawTag { code: 1001, value: "ACME".into() }, cadcraft_doc::RawTag { code: 1000, value: "panel=P-1".into() }];
+    });
+    let common = |s: &Session| s.doc().unwrap().model.get(h).unwrap().common.clone();
+    let before = common(&s);
+
+    ok(&mut s, "(setq d (entget e)) (entmod (subst (cons 8 \"OTHER\") (assoc 8 d) d))");
+
+    let mut wanted = before;
+    wanted.layer = "OTHER".into();
+    assert_eq!(common(&s), wanted, "a layer change took something else with it");
+}
+
+#[test]
+fn a_group_the_file_cannot_hold_is_refused_instead_of_written() {
+    // THE HOLE THE REVIEW FOUND, AND THE WORST OF THEM.
+    //
+    // `(0 . "CIRCLE")` in a `-3` list went into the entity's xdata and then into the file, where
+    // a group `0` ends the entity: every reader took what followed as a new one, so a drawing of
+    // one line came back as a line and a circle. A typo - `(0 . …)` for `(1000 . …)` - was
+    // enough. The check is in `tag_from` now, and this test saves and reopens, because the harm
+    // was in the file rather than in memory.
+    let mut s = session();
+    a_line(&mut s);
+    let bad = eval(&mut s, "(entmod (append (entget e) '((-3 (\"ACME\" (0 . \"CIRCLE\") (1000 . \"ok\"))))))");
+    assert_eq!(bad, Err("0 inside -3: xdata holds group codes 1000 and up".into()));
+    // nothing of it reached the entity, and nothing reaches the file
+    assert_eq!(ok(&mut s, "(if (assoc -3 (entget e '(\"*\"))) \"yes\" \"no\")"), "\"no\"");
+    let saved = cadcraft_io::write_dxf(s.doc().unwrap());
+    let back = cadcraft_io::read_dxf(saved.as_bytes()).unwrap();
+    assert_eq!(back.model.len(), 1, "the saved drawing still holds one entity");
+}
+
+#[test]
+fn an_xdata_group_has_to_be_the_kind_the_file_holds() {
+    let mut s = session();
+    a_line(&mut s);
+    let bad = |s: &mut Session, item: &str| eval(s, &format!("(entmod (append (entget e) '((-3 (\"ACME\" {item})))))"));
+
+    // 1070 is 16 bits wide in the file, and another program reading it expects that
+    assert!(bad(&mut s, "(1070 . 99999)").is_err(), "1070 out of range");
+    assert!(bad(&mut s, "(1071 . \"abc\")").is_err(), "1071 is not a string");
+    assert!(bad(&mut s, "(1040 . \"abc\")").is_err(), "1040 is not a string");
+    assert!(bad(&mut s, "(1002 . \"nao\")").is_err(), "1002 is a brace or nothing");
+    assert!(bad(&mut s, "(1010 . 1.0)").is_err(), "1010 wants a point");
+    // and the braces have to close, or the reader drops the whole application
+    assert!(bad(&mut s, "(1002 . \"{\") (1000 . \"x\")").is_err(), "an unclosed brace");
+    assert!(bad(&mut s, "(1002 . \"}\") (1002 . \"{\")").is_err(), "closed before it opened");
+
+    // what the file does hold goes in, braces and all
+    ok(&mut s, "(entmod (append (entget e) '((-3 (\"ACME\" (1002 . \"{\") (1070 . 7) (1002 . \"}\"))))))");
+    let v = ok(&mut s, "(cdr (assoc -3 (entget e '(\"ACME\"))))");
+    assert_eq!(v, "((\"ACME\" (1002 . \"{\") (1070 . 7) (1002 . \"}\")))", "{v}");
+}
+
+#[test]
+fn a_group_dxf_gives_no_type_to_still_makes_the_round_trip() {
+    // The refusal is about what the file cannot hold, not about codes this module has not been
+    // told about: a drawing from another program may carry one, `entget` shows it, and
+    // `(entmod (entget e))` must not be the call that loses it.
+    let mut s = session();
+    a_line(&mut s);
+    ok(&mut s, "(entmod (append (entget e) '((-3 (\"ACME\" (1009 . \"odd but legal\"))))))");
+    let v = ok(&mut s, "(cdr (assoc -3 (entget e '(\"ACME\"))))");
+    assert_eq!(v, "((\"ACME\" (1009 . \"odd but legal\")))", "{v}");
+}

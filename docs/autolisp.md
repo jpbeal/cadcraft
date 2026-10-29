@@ -97,7 +97,10 @@ removed. `entmake` takes it too, so an entity can be made with its data already 
 keep their types: `1070` and `1071` are integers, `1040`–`1042` reals, and a `1010` point comes back
 as `(1010 x y z)`. `regapp` answers the name, or nil when the drawing already holds data for it:
 there is no APPID table to add a record to, because `tblsearch "APPID"` reads the applications out
-of the drawing's own xdata.
+of the drawing's own xdata. A `-3` list holds only what the file holds: group codes 1000 and up, a
+`1002` that is one brace with the braces closing, a real for `1040`-`1042`, an integer within the
+group's width for `1070` and `1071`, and a point for `1010`-`1013`. Anything else is an error rather
+than data that reads back as nothing.
 
 `entmake` defines blocks: a BLOCK list (2 name, 70 flags, 10 base point, 4 description) begins a
 definition, the entities made after it go into the block instead of the drawing, and an ENDBLK

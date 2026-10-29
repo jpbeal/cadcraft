@@ -385,6 +385,9 @@ pub fn entmake(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
     if let Some(item) = list.iter().find(|v| v.car().as_number() == Some(-3.0)) {
         let Ok(incoming) = super::xdata::from_item(&item) else { return Ok(Flow::Value(Value::Nil)) };
         common.xdata = super::xdata::merge(&[], incoming);
+        if common.xdata.len() > super::xdata::MAX_GROUPS {
+            return Ok(Flow::Value(Value::Nil));
+        }
     }
     if let Some((_, ents)) = ctx.env.pending_block.as_mut() {
         // Into the block being defined; it is added to the drawing, with handles and the layers
@@ -510,20 +513,25 @@ pub fn entmod(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
         new_ins.attribs = old_ins.attribs.clone();
     }
 
-    // XDATA IS NOT LOST IN AN ENTMOD
+    // WHAT THE GROUP LIST CANNOT CARRY IS NOT LOST IN AN ENTMOD
     //
     // `common` comes from `entity_from_list`, which rebuilds the entity from the groups of the
-    // list - and xdata is not an ordinary group, so it came back empty. With
-    // `e.common = common`, any entmod (changing a layer, moving a vertex) wiped the entity's
-    // xdata without saying anything: another program's hyperlink, the annotative scale,
-    // another application's mark. Here the entity's current xdata is the base, and the list
-    // changes ONLY the applications it names.
+    // list - and parts of Common have no group there at all. With `e.common = common`, any
+    // entmod (changing a layer, moving a vertex) wrote that emptiness over the entity and said
+    // nothing. The xdata went that way; so do the annotative scales, the named plot style and,
+    // for most entity kinds, the extrusion.
     let mut common = common;
     let incoming = match list.iter().find(|v| v.car().as_number() == Some(-3.0)) {
         Some(item) => super::xdata::from_item(&item)?,
         None => Vec::new(),
     };
+    // the entity's current xdata is the base, and the list changes ONLY the applications it
+    // names; more groups than the reader will take back is data that dies at the first save
     common.xdata = super::xdata::merge(&old.common.xdata, incoming);
+    if common.xdata.len() > super::xdata::MAX_GROUPS {
+        return Err(LispError::new(format!("-3: more than {} xdata groups on one entity", super::xdata::MAX_GROUPS)));
+    }
+    keep_what_the_list_cannot_carry(&mut common, &old.common, list);
 
     let Ok(d) = ctx.s.doc_mut() else { return Ok(Flow::Value(Value::Nil)) };
     d.ensure_layer(&common.layer);
@@ -537,6 +545,23 @@ pub fn entmod(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
         ctx.s.touch();
     }
     Ok(Flow::Value(if ok { list.clone() } else { Value::Nil }))
+}
+
+/// The parts of `Common` an entity list has no group for, kept from the entity being changed.
+///
+/// `entget` is built from the entity's DXF groups, and three parts of `Common` are not there:
+/// the annotative scales ride in a record of their own, the named plot style is a reference
+/// resolved when the file is read (`entity_groups` builds its list with no plot styles at all,
+/// so the group can never come out), and the extrusion is written only by the entity kinds that
+/// have one. A rebuilt `common` therefore has them empty, and assigning it threw them away.
+///
+/// What the list does carry still wins: a list with a `210` changes the extrusion.
+fn keep_what_the_list_cannot_carry(common: &mut cadcraft_doc::Common, old: &cadcraft_doc::Common, list: &Value) {
+    if !list.iter().any(|v| v.car().as_number() == Some(210.0)) {
+        common.extrusion = old.extrusion;
+    }
+    common.plot_style = old.plot_style.clone();
+    common.anno_scales = old.anno_scales.clone();
 }
 
 /// `(regapp name)`: make an application name usable in xdata.
